@@ -213,14 +213,26 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     call_sid = call_info.get("call_sid")
     
     try:
-        # Get first message which should be "start" with stream metadata
-        start_msg = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
-        start_data = json.loads(start_msg)
-        
-        if start_data.get("event") == "start":
-            stream_sid = start_data.get("start", {}).get("streamSid")
-            call_sid = start_data.get("start", {}).get("callSid") or call_sid
-            logger.info(f"Stream started: {stream_sid}, call: {call_sid}")
+        # Get first message which should be "connected" then "start" with stream metadata
+        # Twilio sends: connected -> start -> media events
+        while not stream_sid:
+            msg = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+            data = json.loads(msg)
+            event = data.get("event")
+            logger.info(f"Received Twilio event: {event}")
+            
+            if event == "connected":
+                logger.info("Twilio WebSocket connected")
+                continue
+            elif event == "start":
+                stream_sid = data.get("start", {}).get("streamSid")
+                call_sid = data.get("start", {}).get("callSid") or call_sid
+                logger.info(f"Stream started: {stream_sid}, call: {call_sid}")
+                break
+            elif event == "stop":
+                logger.info("Stream stopped before start")
+                await websocket.close()
+                return
         
         if not stream_sid:
             logger.error("No stream_sid received")
