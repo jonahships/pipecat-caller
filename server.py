@@ -275,14 +275,16 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         from deepgram import LiveOptions
         stt = DeepgramSTTService(
             api_key=DEEPGRAM_API_KEY,
+            sample_rate=8000,
             live_options=LiveOptions(
                 model="nova-2",
                 language="en-US",
-                encoding="mulaw",
+                encoding="linear16",  # Pipecat converts mulaw to PCM internally
                 sample_rate=8000,
                 channels=1,
                 punctuate=True,
                 interim_results=True,
+                endpointing=300,
             )
         )
         
@@ -316,6 +318,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             params=PipelineParams(
                 enable_metrics=True,
                 enable_usage_metrics=True,
+                allow_interruptions=True,
             )
         )
         
