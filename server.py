@@ -267,9 +267,10 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         )
         
         # Deepgram STT for speech recognition
+        from deepgram import LiveOptions
         stt = DeepgramSTTService(
             api_key=DEEPGRAM_API_KEY,
-            live_options={"model": "nova-2", "language": "en-US"}
+            live_options=LiveOptions(model="nova-2", language="en-US", encoding="mulaw", sample_rate=8000)
         )
         
         # OpenAI LLM (via copilot-api proxy)
