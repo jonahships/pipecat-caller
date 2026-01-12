@@ -23,8 +23,6 @@ from contextlib import asynccontextmanager
 
 import httpx
 from datetime import datetime
-import httpx
-from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, HTTPException, Request
 from fastapi.responses import Response
@@ -64,11 +62,8 @@ PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8765")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
 
-
-# Discord webhook for call logs
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-DISCORD_CALL_LOG_CHANNEL = os.getenv("DISCORD_CALL_LOG_CHANNEL", "1460101081148428470")
-
+# Callback number for voicemails
+CALLBACK_NUMBER = os.getenv("CALLBACK_NUMBER", "+14127062783")
 
 # Discord webhook for call logs
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
@@ -117,7 +112,7 @@ app = FastAPI(title="Pipecat Twilio Caller", lifespan=lifespan)
 
 @app.post("/call", response_model=CallResponse)
 async def initiate_call(request: CallRequest):
-    """Initiate an outbound call"""
+    """Initiate an outbound call with answering machine detection"""
     if not twilio_client:
         raise HTTPException(status_code=500, detail="Twilio not configured")
     
@@ -130,15 +125,15 @@ async def initiate_call(request: CallRequest):
     active_calls[call_id] = {
         "agent": agent,
         "to_number": request.to_number,
+        "custom_prompt": request.custom_prompt,
         "status": "initiating",
         "call_sid": None,
-        "conversation": []
+        "conversation": [],
+        "answered_by": None  # Will be "human" or "machine"
     }
     
     try:
-        # Make the call via Twilio
-        # Twilio will hit our /twilio/voice webhook, which returns TwiML
-        # The TwiML tells Twilio to connect a media stream to our WebSocket
+        # Make the call via Twilio with Answering Machine Detection
         call = twilio_client.calls.create(
             to=request.to_number,
             from_=TWILIO_PHONE_NUMBER,
@@ -148,6 +143,12 @@ async def initiate_call(request: CallRequest):
             record=True,
             recording_status_callback=f"{PUBLIC_URL}/twilio/recording?call_id={call_id}",
             recording_status_callback_event=["completed"],
+            # Answering Machine Detection
+            machine_detection="DetectMessageEnd",  # Wait for beep before proceeding
+            machine_detection_timeout=30,
+            async_amd=True,  # Non-blocking AMD
+            async_amd_status_callback=f"{PUBLIC_URL}/twilio/amd?call_id={call_id}",
+            async_amd_status_callback_method="POST",
         )
         
         active_calls[call_id]["call_sid"] = call.sid
@@ -167,10 +168,36 @@ async def initiate_call(request: CallRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/twilio/amd")
+async def twilio_amd_webhook(request: Request, call_id: str):
+    """
+    Twilio AMD (Answering Machine Detection) callback.
+    Called when AMD determines if human or machine answered.
+    """
+    form = await request.form()
+    answered_by = form.get("AnsweredBy", "unknown")
+    call_sid = form.get("CallSid", "")
+    
+    logger.info(f"AMD result for {call_id}: {answered_by}")
+    
+    if call_id in active_calls:
+        active_calls[call_id]["answered_by"] = answered_by
+        
+        # If voicemail detected, update the call to leave a message
+        if answered_by in ["machine_end_beep", "machine_end_silence", "machine_end_other"]:
+            logger.info(f"Voicemail detected for {call_id}, will leave message")
+            active_calls[call_id]["is_voicemail"] = True
+        elif answered_by == "human":
+            logger.info(f"Human answered {call_id}, proceeding with live conversation")
+            active_calls[call_id]["is_voicemail"] = False
+    
+    return {"ok": True}
+
+
 @app.post("/twilio/voice")
 async def twilio_voice_webhook(request: Request, call_id: str):
     """
-    Twilio voice webhook - returns TwiML to connect media stream.
+    Twilio voice webhook - returns TwiML to connect media stream or leave voicemail.
     This is called by Twilio when the call is answered.
     """
     if call_id not in active_calls:
@@ -180,8 +207,28 @@ async def twilio_voice_webhook(request: Request, call_id: str):
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
     
-    # Build TwiML to connect media stream to our WebSocket
+    call_info = active_calls[call_id]
     response = VoiceResponse()
+    
+    # Check if this is a voicemail (AMD detected machine)
+    if call_info.get("is_voicemail"):
+        logger.info(f"Leaving voicemail for {call_id}")
+        
+        # Build voicemail message from custom prompt
+        custom_prompt = call_info.get("custom_prompt", "")
+        agent_name = call_info.get("agent", {}).get("name", "Larry")
+        
+        if custom_prompt:
+            voicemail_text = f"Hi, this is {agent_name} calling on behalf of Jonah from Nebaura. {custom_prompt}. Please call us back at {CALLBACK_NUMBER}. That's {format_phone_for_speech(CALLBACK_NUMBER)}. Thank you, and have a great day!"
+        else:
+            voicemail_text = f"Hi, this is {agent_name} calling on behalf of Jonah from Nebaura. We were trying to reach you. Please call us back at {CALLBACK_NUMBER}. That's {format_phone_for_speech(CALLBACK_NUMBER)}. Thank you!"
+        
+        response.say(voicemail_text, voice="Polly.Matthew")
+        response.hangup()
+        
+        return Response(content=str(response), media_type="application/xml")
+    
+    # Live conversation - connect media stream to WebSocket
     connect = Connect()
     
     # WebSocket URL for media stream
@@ -197,6 +244,17 @@ async def twilio_voice_webhook(request: Request, call_id: str):
     return Response(content=str(response), media_type="application/xml")
 
 
+def format_phone_for_speech(phone: str) -> str:
+    """Format phone number for clear speech (digit by digit)"""
+    digits = ''.join(c for c in phone if c.isdigit())
+    # Format as: 4 1 2, 7 0 6, 2 7 8 3
+    if len(digits) == 11 and digits[0] == '1':
+        digits = digits[1:]  # Remove leading 1
+    if len(digits) == 10:
+        return f"{digits[0]} {digits[1]} {digits[2]}, {digits[3]} {digits[4]} {digits[5]}, {digits[6]} {digits[7]} {digits[8]} {digits[9]}"
+    return ', '.join(digits)
+
+
 @app.post("/twilio/status")
 async def twilio_status_webhook(request: Request, call_id: str):
     """Twilio status callback - track call status changes"""
@@ -207,15 +265,12 @@ async def twilio_status_webhook(request: Request, call_id: str):
         active_calls[call_id]["status"] = status
         logger.info(f"Call {call_id} status: {status}")
         
-        # Send status update to Discord (recording will send separately with URL)
         if status == "completed":
-            # Wait a bit for recording, then send if no recording callback comes
             asyncio.create_task(send_discord_call_log_delayed(call_id))
     
     return {"ok": True}
 
 
-
 @app.post("/twilio/recording")
 async def twilio_recording_webhook(request: Request, call_id: str):
     """Twilio recording callback - receive recording URL when ready"""
@@ -250,86 +305,21 @@ async def send_discord_call_log(call_id: str, include_recording: bool = False):
     status = info.get("status", "unknown")
     duration = info.get("recording_duration", "0")
     recording_url = info.get("recording_url", "")
+    answered_by = info.get("answered_by", "unknown")
+    is_voicemail = info.get("is_voicemail", False)
     
     # Build embed
+    title = "📞 Voicemail Left" if is_voicemail else "📞 Call Completed"
+    color = 0xffaa00 if is_voicemail else 0x00ff00
+    
     embed = {
-        "title": f"📞 Call Completed" if status == "completed" else f"📞 Call {status.title()}",
-        "color": 0x00ff00 if status == "completed" else 0xffaa00,
+        "title": title if status == "completed"e f"📞 Call {status.title()}",
+        "color": color,
         "fields": [
             {"name": "To", "value": to_number, "inline": True},
             {"name": "Agent", "value": agent_name, "inline": True},
             {"name": "Duration", "value": f"{duration}s", "inline": True},
-            {"name": "Status", "value": status, "inline": True},
-            {"name": "Call ID", "value": call_id, "inline": True},
-        ],
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    
-    if recording_url:
-        embed["fields"].append({"name": "Recording", "value": f"[Download MP3]({recording_url})", "inline": False})
-    
-    # Send via Discord webhook
-    try:
-        async with httpx.AsyncClient() as client:
-            if DISCORD_WEBHOOK_URL:
-                await client.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
-                logger.info(f"Sent call log to Discord webhook for {call_id}")
-    except Exception as e:
-        logger.error(f"Failed to send Discord call log: {e}")
-
-
-async def send_discord_call_log_delayed(call_id: str, delay: float = 10.0):
-    """Send log after delay if recording hasn't arrived"""
-    await asyncio.sleep(delay)
-    if call_id in active_calls and not active_calls[call_id].get("recording_url"):
-        await send_discord_call_log(call_id, include_recording=False)
-
-
-
-@app.post("/twilio/recording")
-async def twilio_recording_webhook(request: Request, call_id: str):
-    """Twilio recording callback - receive recording URL when ready"""
-    form = await request.form()
-    recording_url = form.get("RecordingUrl", "")
-    recording_sid = form.get("RecordingSid", "")
-    duration = form.get("RecordingDuration", "0")
-    
-    if call_id in active_calls:
-        active_calls[call_id]["recording_url"] = f"{recording_url}.mp3"
-        active_calls[call_id]["recording_sid"] = recording_sid
-        active_calls[call_id]["recording_duration"] = duration
-        logger.info(f"Recording ready for {call_id}: {recording_url}.mp3 ({duration}s)")
-        
-        # Send to Discord
-        await send_discord_call_log(call_id, include_recording=True)
-    
-    return {"ok": True}
-
-
-async def send_discord_call_log(call_id: str, include_recording: bool = False):
-    """Send call log to Discord channel"""
-    if not DISCORD_WEBHOOK_URL and not DISCORD_CALL_LOG_CHANNEL:
-        return
-    
-    if call_id not in active_calls:
-        return
-    
-    info = active_calls[call_id]
-    to_number = info.get("to_number", "Unknown")
-    agent_name = info.get("agent", {}).get("name", "Unknown")
-    status = info.get("status", "unknown")
-    duration = info.get("recording_duration", "0")
-    recording_url = info.get("recording_url", "")
-    
-    # Build embed
-    embed = {
-        "title": f"📞 Call Completed" if status == "completed" else f"📞 Call {status.title()}",
-        "color": 0x00ff00 if status == "completed" else 0xffaa00,
-        "fields": [
-            {"name": "To", "value": to_number, "inline": True},
-            {"name": "Agent", "value": agent_name, "inline": True},
-            {"name": "Duration", "value": f"{duration}s", "inline": True},
-            {"name": "Status", "value": status, "inline": True},
+            {"name": "Answered By", "value": answered_by, "inline": True},
             {"name": "Call ID", "value": call_id, "inline": True},
         ],
         "timestamp": datetime.utcnow().isoformat()
@@ -377,8 +367,6 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     call_sid = call_info.get("call_sid")
     
     try:
-        # Get first message which should be "connected" then "start" with stream metadata
-        # Twilio sends: connected -> start -> media events
         while not stream_sid:
             msg = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
             data = json.loads(msg)
@@ -411,7 +399,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             auth_token=TWILIO_AUTH_TOKEN,
             params=TwilioFrameSerializer.InputParams(
                 auto_hang_up=True,
-                sample_rate=8000,  # Twilio uses 8kHz mulaw
+                sample_rate=8000,
             )
         )
         
@@ -441,7 +429,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             live_options=LiveOptions(
                 model="nova-2",
                 language="en-US",
-                encoding="linear16",  # Pipecat converts mulaw to PCM internally
+                encoding="linear16",
                 sample_rate=8000,
                 channels=1,
                 punctuate=True,
@@ -464,7 +452,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         context = LLMContext(messages)
         context_aggregator = LLMContextAggregatorPair(context)
         
-        # Build pipeline: input -> STT -> user aggregator -> LLM -> TTS -> output
+        # Build pipeline
         pipeline = Pipeline([
             transport.input(),
             stt,
@@ -487,8 +475,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         # Start with agent greeting
         @transport.event_handler("on_client_connected")
         async def on_connected(transport, client):
-            logger.info(f"Client connected for {call_id}")
-            # Agent speaks first
+            logger.in(f"Client connected for {call_id}")
             messages.append({
                 "role": "system", 
                 "content": "Start the conversation by introducing yourself briefly."
@@ -527,7 +514,8 @@ async def list_calls():
                 "call_id": cid,
                 "to_number": info["to_number"],
                 "status": info["status"],
-                "agent": info["agent"]["name"]
+                "agent": info["agent"]["name"],
+                "answered_by": info.get("answered_by", "unknown")
             }
             for cid, info in active_calls.items()
         ]
@@ -546,7 +534,9 @@ async def get_call(call_id: str):
         "to_number": info["to_number"],
         "status": info["status"],
         "agent": info["agent"]["name"],
-        "call_sid": info.get("call_sid")
+        "call_sid": info.get("call_sid"),
+        "answered_by": info.get("answered_by", "unknown"),
+        "is_voicemail": info.get("is_voicemail", False)
     }
 
 
