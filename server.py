@@ -148,9 +148,6 @@ async def initiate_call(request: CallRequest):
             record=True,
             recording_status_callback=f"{PUBLIC_URL}/twilio/recording?call_id={call_id}",
             recording_status_callback_event=["completed"],
-            record=True,
-            recording_status_callback=f"{PUBLIC_URL}/twilio/recording?call_id={call_id}",
-            recording_status_callback_event=["completed"]
         )
         
         active_calls[call_id]["call_sid"] = call.sid
