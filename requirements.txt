@@ -1,0 +1,6 @@
+pipecat-ai[websocket,silero,elevenlabs,openai]
+aiohttp
+fastapi
+uvicorn
+python-dotenv
+twilio
