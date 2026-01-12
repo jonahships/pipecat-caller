@@ -4,9 +4,9 @@ Agent configurations - same agents as ElevenLabs but self-hosted
 
 # ElevenLabs voice IDs
 VOICES = {
-    "larry": "XjdmlV0OFXfXE6Mg2Sb7",      # Larry's voice
-    "liam": "pNInz6obpgDQGcFmaJgB",        # Liam Sales (Adam)
-    "jasmine": "21m00Tcm4TlvDq8ikWAM",     # Jasmine (Rachel)
+    "larry": "wDsJlOXPqcvIUKdLXjDs",      # Larry's actual voice from ElevenLabs
+    "liam": "8IbUB2LiiCZ85IJAHNnZ",        # Liam Sales
+    "jasmine": "LtPsVjX1k0Kl4StEMZPK",     # Jasmine (Support & Appointments)
 }
 
 # Agent configurations
