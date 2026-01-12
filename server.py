@@ -37,6 +37,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport, FastAPIWebsocketParams
 from pipecat.serializers.twilio import TwilioFrameSerializer
@@ -54,6 +55,7 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://91.98.137.199:4141/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8765")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
@@ -264,6 +266,12 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             voice_id=agent["voice_id"],
         )
         
+        # Deepgram STT for speech recognition
+        stt = DeepgramSTTService(
+            api_key=DEEPGRAM_API_KEY,
+            live_options={"model": "nova-2", "language": "en-US"}
+        )
+        
         # OpenAI LLM (via copilot-api proxy)
         llm = OpenAILLMService(
             api_key=OPENAI_API_KEY,
@@ -278,9 +286,10 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         context = LLMContext(messages)
         context_aggregator = LLMContextAggregatorPair(context)
         
-        # Build pipeline
+        # Build pipeline: input -> STT -> user aggregator -> LLM -> TTS -> output
         pipeline = Pipeline([
             transport.input(),
+            stt,
             context_aggregator.user(),
             llm,
             tts,

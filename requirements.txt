@@ -1,4 +1,4 @@
-pipecat-ai[websocket,silero,elevenlabs,openai]
+pipecat-ai[websocket,silero,elevenlabs,openai,deepgram]
 aiohttp
 fastapi
 uvicorn
