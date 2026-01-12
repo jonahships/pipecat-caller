@@ -21,6 +21,10 @@ import uuid
 from typing import Optional
 from contextlib import asynccontextmanager
 
+import httpx
+from datetime import datetime
+import httpx
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, HTTPException, Request
 from fastapi.responses import Response
@@ -59,6 +63,16 @@ DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:8765")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
+
+
+# Discord webhook for call logs
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+DISCORD_CALL_LOG_CHANNEL = os.getenv("DISCORD_CALL_LOG_CHANNEL", "1460101081148428470")
+
+
+# Discord webhook for call logs
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+DISCORD_CALL_LOG_CHANNEL = os.getenv("DISCORD_CALL_LOG_CHANNEL", "1460101081148428470")
 
 # Active calls tracking
 active_calls: dict = {}
@@ -130,7 +144,13 @@ async def initiate_call(request: CallRequest):
             from_=TWILIO_PHONE_NUMBER,
             url=f"{PUBLIC_URL}/twilio/voice?call_id={call_id}",
             status_callback=f"{PUBLIC_URL}/twilio/status?call_id={call_id}",
-            status_callback_event=["initiated", "ringing", "answered", "completed"]
+            status_callback_event=["initiated", "ringing", "answered", "completed"],
+            record=True,
+            recording_status_callback=f"{PUBLIC_URL}/twilio/recording?call_id={call_id}",
+            recording_status_callback_event=["completed"],
+            record=True,
+            recording_status_callback=f"{PUBLIC_URL}/twilio/recording?call_id={call_id}",
+            recording_status_callback_event=["completed"]
         )
         
         active_calls[call_id]["call_sid"] = call.sid
@@ -189,8 +209,153 @@ async def twilio_status_webhook(request: Request, call_id: str):
     if call_id in active_calls:
         active_calls[call_id]["status"] = status
         logger.info(f"Call {call_id} status: {status}")
+        
+        # Send status update to Discord (recording will send separately with URL)
+        if status == "completed":
+            # Wait a bit for recording, then send if no recording callback comes
+            asyncio.create_task(send_discord_call_log_delayed(call_id))
     
     return {"ok": True}
+
+
+
+@app.post("/twilio/recording")
+async def twilio_recording_webhook(request: Request, call_id: str):
+    """Twilio recording callback - receive recording URL when ready"""
+    form = await request.form()
+    recording_url = form.get("RecordingUrl", "")
+    recording_sid = form.get("RecordingSid", "")
+    duration = form.get("RecordingDuration", "0")
+    
+    if call_id in active_calls:
+        active_calls[call_id]["recording_url"] = f"{recording_url}.mp3"
+        active_calls[call_id]["recording_sid"] = recording_sid
+        active_calls[call_id]["recording_duration"] = duration
+        logger.info(f"Recording ready for {call_id}: {recording_url}.mp3 ({duration}s)")
+        
+        # Send to Discord
+        await send_discord_call_log(call_id, include_recording=True)
+    
+    return {"ok": True}
+
+
+async def send_discord_call_log(call_id: str, include_recording: bool = False):
+    """Send call log to Discord channel"""
+    if not DISCORD_WEBHOOK_URL and not DISCORD_CALL_LOG_CHANNEL:
+        return
+    
+    if call_id not in active_calls:
+        return
+    
+    info = active_calls[call_id]
+    to_number = info.get("to_number", "Unknown")
+    agent_name = info.get("agent", {}).get("name", "Unknown")
+    status = info.get("status", "unknown")
+    duration = info.get("recording_duration", "0")
+    recording_url = info.get("recording_url", "")
+    
+    # Build embed
+    embed = {
+        "title": f"📞 Call Completed" if status == "completed" else f"📞 Call {status.title()}",
+        "color": 0x00ff00 if status == "completed" else 0xffaa00,
+        "fields": [
+            {"name": "To", "value": to_number, "inline": True},
+            {"name": "Agent", "value": agent_name, "inline": True},
+            {"name": "Duration", "value": f"{duration}s", "inline": True},
+            {"name": "Status", "value": status, "inline": True},
+            {"name": "Call ID", "value": call_id, "inline": True},
+        ],
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    if recording_url:
+        embed["fields"].append({"name": "Recording", "value": f"[Download MP3]({recording_url})", "inline": False})
+    
+    # Send via Discord webhook
+    try:
+        async with httpx.AsyncClient() as client:
+            if DISCORD_WEBHOOK_URL:
+                await client.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
+                logger.info(f"Sent call log to Discord webhook for {call_id}")
+    except Exception as e:
+        logger.error(f"Failed to send Discord call log: {e}")
+
+
+async def send_discord_call_log_delayed(call_id: str, delay: float = 10.0):
+    """Send log after delay if recording hasn't arrived"""
+    await asyncio.sleep(delay)
+    if call_id in active_calls and not active_calls[call_id].get("recording_url"):
+        await send_discord_call_log(call_id, include_recording=False)
+
+
+
+@app.post("/twilio/recording")
+async def twilio_recording_webhook(request: Request, call_id: str):
+    """Twilio recording callback - receive recording URL when ready"""
+    form = await request.form()
+    recording_url = form.get("RecordingUrl", "")
+    recording_sid = form.get("RecordingSid", "")
+    duration = form.get("RecordingDuration", "0")
+    
+    if call_id in active_calls:
+        active_calls[call_id]["recording_url"] = f"{recording_url}.mp3"
+        active_calls[call_id]["recording_sid"] = recording_sid
+        active_calls[call_id]["recording_duration"] = duration
+        logger.info(f"Recording ready for {call_id}: {recording_url}.mp3 ({duration}s)")
+        
+        # Send to Discord
+        await send_discord_call_log(call_id, include_recording=True)
+    
+    return {"ok": True}
+
+
+async def send_discord_call_log(call_id: str, include_recording: bool = False):
+    """Send call log to Discord channel"""
+    if not DISCORD_WEBHOOK_URL and not DISCORD_CALL_LOG_CHANNEL:
+        return
+    
+    if call_id not in active_calls:
+        return
+    
+    info = active_calls[call_id]
+    to_number = info.get("to_number", "Unknown")
+    agent_name = info.get("agent", {}).get("name", "Unknown")
+    status = info.get("status", "unknown")
+    duration = info.get("recording_duration", "0")
+    recording_url = info.get("recording_url", "")
+    
+    # Build embed
+    embed = {
+        "title": f"📞 Call Completed" if status == "completed" else f"📞 Call {status.title()}",
+        "color": 0x00ff00 if status == "completed" else 0xffaa00,
+        "fields": [
+            {"name": "To", "value": to_number, "inline": True},
+            {"name": "Agent", "value": agent_name, "inline": True},
+            {"name": "Duration", "value": f"{duration}s", "inline": True},
+            {"name": "Status", "value": status, "inline": True},
+            {"name": "Call ID", "value": call_id, "inline": True},
+        ],
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    if recording_url:
+        embed["fields"].append({"name": "Recording", "value": f"[Download MP3]({recording_url})", "inline": False})
+    
+    # Send via Discord webhook
+    try:
+        async with httpx.AsyncClient() as client:
+            if DISCORD_WEBHOOK_URL:
+                await client.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
+                logger.info(f"Sent call log to Discord webhook for {call_id}")
+    except Exception as e:
+        logger.error(f"Failed to send Discord call log: {e}")
+
+
+async def send_discord_call_log_delayed(call_id: str, delay: float = 10.0):
+    """Send log after delay if recording hasn't arrived"""
+    await asyncio.sleep(delay)
+    if call_id in active_calls and not active_calls[call_id].get("recording_url"):
+        await send_discord_call_log(call_id, include_recording=False)
 
 
 @app.websocket("/ws/{call_id}")
