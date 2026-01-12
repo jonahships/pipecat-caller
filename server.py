@@ -247,7 +247,10 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             call_sid=call_sid,
             account_sid=TWILIO_ACCOUNT_SID,
             auth_token=TWILIO_AUTH_TOKEN,
-            params=TwilioFrameSerializer.InputParams(auto_hang_up=True)
+            params=TwilioFrameSerializer.InputParams(
+                auto_hang_up=True,
+                sample_rate=8000,  # Twilio uses 8kHz mulaw
+            )
         )
         
         transport = FastAPIWebsocketTransport(
@@ -255,8 +258,10 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             params=FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
+                audio_in_sample_rate=8000,
+                audio_out_sample_rate=8000,
                 serializer=serializer,
-                vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.5)),
+                vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.8)),
             )
         )
         
@@ -270,7 +275,15 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         from deepgram import LiveOptions
         stt = DeepgramSTTService(
             api_key=DEEPGRAM_API_KEY,
-            live_options=LiveOptions(model="nova-2", language="en-US", encoding="mulaw", sample_rate=8000)
+            live_options=LiveOptions(
+                model="nova-2",
+                language="en-US",
+                encoding="mulaw",
+                sample_rate=8000,
+                channels=1,
+                punctuate=True,
+                interim_results=True,
+            )
         )
         
         # OpenAI LLM (via copilot-api proxy)
