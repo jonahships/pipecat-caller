@@ -313,7 +313,7 @@ async def send_discord_call_log(call_id: str, include_recording: bool = False):
     color = 0xffaa00 if is_voicemail else 0x00ff00
     
     embed = {
-        "title": title if status == "completed"e f"📞 Call {status.title()}",
+        "title": title if status == "completed" else f"📞 Call {status.title()}",
         "color": color,
         "fields": [
             {"name": "To", "value": to_number, "inline": True},
@@ -475,7 +475,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         # Start with agent greeting
         @transport.event_handler("on_client_connected")
         async def on_connected(transport, client):
-            logger.in(f"Client connected for {call_id}")
+            logger.info(f"Client connected for {call_id}")
             messages.append({
                 "role": "system", 
                 "content": "Start the conversation by introducing yourself briefly."
